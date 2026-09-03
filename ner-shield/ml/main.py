@@ -4,10 +4,11 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
 MODEL_PATH = Path(__file__).parent / 'risk_model.pkl'
+
 try:
     with open(MODEL_PATH, 'rb') as file:
         model = pickle.load(file)
-except (EOFError, pickle.UnpicklingError, ValueError):
+except (EOFError, pickle.UnpicklingError, ValueError, FileNotFoundError):
     import train_model
     with open(MODEL_PATH, 'rb') as file:
         model = pickle.load(file)
@@ -28,10 +29,15 @@ def classify(score: float) -> str:
     return 'BLOCKED'
 
 @app.get('/health')
-def health(): return {'status': 'ok', 'service': 'risk-engine'}
+def health(): 
+    return {'status': 'ok', 'service': 'risk-engine'}
 
 @app.post('/predict')
 def predict(payload: RiskInput):
     values = [[payload.rainfall_24h, payload.soil_moisture, payload.slope_angle, payload.elevation, payload.road_condition]]
     score = round(float(model.predict(values)[0]), 2)
     return {'riskScore': score, 'classification': classify(score)}
+
+if __name__ == '__main__':
+    import uvicorn
+    uvicorn.run('main:app', host='127.0.0.1', port=8000, reload=True)
