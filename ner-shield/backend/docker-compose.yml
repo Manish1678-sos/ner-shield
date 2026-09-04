@@ -1,0 +1,64 @@
+# ==============================================================================
+# NER-SHIELD: Container Orchestration Matrix
+# ==============================================================================
+
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ner_shield_backend
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      - APP_NAME=NER-SHIELD-Core
+      - ENVIRONMENT=development
+      - DEBUG=True
+      - HOST=0.0.0.0
+      - PORT=5000
+      - CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+      - DATABASE_URL=postgresql+asyncpg://nershield:nershield_secure_pwd@db:5432/nershield_db
+      - JWT_SECRET=super_secret_ner_shield_jwt_key_development_only_2026
+      - MODEL_PATH=scripts/risk_model.pkl
+      - GRAPH_PATH=scripts/road_graph.pickle
+      - OPEN_METEO_BASE_URL=https://api.open-meteo.com/v1/forecast
+      - RAINVIEWER_BASE_URL=https://api.rainviewer.com/public/weather-maps.json
+    volumes:
+      - ./app:/app/app
+      - ./scripts:/app/scripts
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - ner_shield_network
+
+  db:
+    image: postgis/postgis:16-3.4-alpine
+    container_name: ner_shield_postgis
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: nershield
+      POSTGRES_PASSWORD: nershield_secure_pwd
+      POSTGRES_DB: nershield_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - ner_shield_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U nershield -d nershield_db" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ner_shield_network
+
+volumes:
+  ner_shield_pgdata:
+    driver: local
+
+networks:
+  ner_shield_network:
+    driver: bridge
