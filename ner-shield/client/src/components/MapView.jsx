@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { MapContainer, TileLayer, Polyline, Marker, Popup, useMap } from 'react-leaflet';
+import { useEffect, useMemo } from 'react';
+import { MapContainer, TileLayer, Polyline, Marker, Popup, Tooltip, SVGOverlay, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
@@ -10,25 +10,26 @@ L.Icon.Default.mergeOptions({
   shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
 });
 
-const createPinIcon = (emoji, color) => 
+const createPinIcon = (text, bg, border = '#ffffff', pulse = false) =>
   L.divIcon({
-    className: 'map-custom-pin',
+    className: 'custom-map-pin',
     html: `<div style="
-      background: ${color};
-      width: 30px;
-      height: 30px;
+      background: ${bg};
+      width: 32px;
+      height: 32px;
       border-radius: 50%;
       display: flex;
       align-items: center;
       justify-content: center;
-      color: #0f172a;
-      font-weight: bold;
-      font-size: 13px;
-      border: 2px solid #ffffff;
-      box-shadow: 0 0 10px rgba(0,0,0,0.5);
-    ">${emoji}</div>`,
-    iconSize: [30, 30],
-    iconAnchor: [15, 15]
+      color: #0b1114;
+      font-weight: 800;
+      font-size: 11px;
+      border: 2px solid ${border};
+      box-shadow: 0 0 ${pulse ? '14px ' + bg : '6px rgba(0,0,0,0.6)'};
+      pointer-events: auto;
+    ">${text}</div>`,
+    iconSize: [32, 32],
+    iconAnchor: [16, 16]
   });
 
 const extractLatLng = (routeObj) => {
@@ -41,179 +42,397 @@ const extractLatLng = (routeObj) => {
   } else if (Array.isArray(routeObj?.coordinates)) {
     rawCoords = routeObj.coordinates;
   }
-  
-  return rawCoords.map((pt) => {
-    if (Array.isArray(pt) && pt.length >= 2) {
-      return [Number(pt[1]), Number(pt[0])];
-    }
-    return null;
-  }).filter(pt => pt && !isNaN(pt[0]) && !isNaN(pt[1]));
+
+  return rawCoords
+    .map((pt) => {
+      if (Array.isArray(pt) && pt.length >= 2) {
+        const first = Number(pt[0]);
+        const second = Number(pt[1]);
+        return first > 45 ? [second, first] : [first, second];
+      }
+      return null;
+    })
+    .filter((pt) => pt && !isNaN(pt[0]) && !isNaN(pt[1]));
 };
 
-function FitBounds({ primaryPath, bypassPath }) {
+function getMinDistanceToCorridor(latLng, pathCoords) {
+  if (!pathCoords || pathCoords.length === 0) return 999;
+  let minDistance = 999;
+  const [lat, lon] = latLng;
+  for (const [pLat, pLon] of pathCoords) {
+    const d = Math.hypot(lat - pLat, lon - pLon);
+    if (d < minDistance) minDistance = d;
+  }
+  return minDistance;
+}
+
+function MapController({ primaryPath, bypassPath, originCoords, destCoords, originName, destName }) {
   const map = useMap();
+
   useEffect(() => {
+    map.closePopup();
+
     try {
       map.invalidateSize();
       const combined = [...primaryPath, ...bypassPath];
-      if (combined.length > 0) {
-        map.fitBounds(combined, { padding: [40, 40], maxZoom: 8 });
+      if (originCoords) combined.push(originCoords);
+      if (destCoords) combined.push(destCoords);
+
+      if (combined.length > 1) {
+        map.fitBounds(combined, { padding: [55, 55], maxZoom: 9 });
       }
-    } catch (e) {}
-  }, [primaryPath, bypassPath, map]);
+    } catch { }
+  }, [primaryPath, bypassPath, originCoords, destCoords, originName, destName, map]);
 
   return null;
 }
 
-export default function MapView({ routes, places, incident, cargo, showRadar }) {
-  const [radarPath, setRadarPath] = useState(null);
-  
-  const primaryRouteCoords = extractLatLng(routes?.primary);
-  const bypassRouteCoords = extractLatLng(routes?.bypass);
-  const defaultCenter = primaryRouteCoords.length > 0 ? primaryRouteCoords[0] : [26.1445, 91.7362];
+export default function MapView({
+  routes,
+  places,
+  incident,
+  cargo,
+  showRadar,
+  originName,
+  destName,
+  originCoords,
+  destCoords,
+  rainfall = 86,
+  soil = 54
+}) {
+  const primaryRouteCoords = useMemo(() => extractLatLng(routes?.primary), [routes?.primary]);
+  const bypassRouteCoords = useMemo(() => extractLatLng(routes?.bypass), [routes?.bypass]);
+  const defaultCenter = originCoords || [26.1445, 91.7362];
 
-  const riskStatus = (routes?.primary?.risk > 0.7 || incident) ? 'BLOCKED' : 'NORMAL';
+  const riskScore = Number(routes?.primary?.risk || 0);
+  const isBlocked = riskScore > 0.8 || Boolean(incident);
+  const isHighRisk = riskScore > 0.45 && !isBlocked;
+  const isElevatedHazard = isBlocked || isHighRisk;
 
-  useEffect(() => {
-    if (showRadar) {
-      fetch('https://api.rainviewer.com/public/weather-maps.json')
-        .then((res) => res.json())
-        .then((data) => {
-          if (data && data.radar && data.radar.past && data.radar.past.length > 0) {
-            const latestFrame = data.radar.past[data.radar.past.length - 1];
-            setRadarPath(latestFrame.path);
-          }
-        })
-        .catch((err) => console.error('Error loading weather radar tile path:', err));
+  let primaryColor = '#10b981';
+  let statusText = 'SAFE / OPERATIONAL';
+  if (isBlocked) {
+    primaryColor = '#ef4444';
+    statusText = 'BLOCKED / SEVERED';
+  } else if (isHighRisk) {
+    primaryColor = '#f59e0b';
+    statusText = 'HIGH RISK / SATURATED';
+  }
+
+  const bypassEmergencyFacilities = useMemo(() => {
+    if (!isElevatedHazard || !bypassRouteCoords.length || !Array.isArray(places)) {
+      return [];
     }
-  }, [showRadar]);
+    return places
+      .filter((p) => p.type === 'hospital' || p.type === 'helipad')
+      .map((p) => {
+        const first = Number(p.position[0]);
+        const second = Number(p.position[1]);
+        const latLng = first > 45 ? [second, first] : [first, second];
+        const dist = getMinDistanceToCorridor(latLng, bypassRouteCoords);
+        return { ...p, latLng, dist };
+      })
+      .filter((p) => p.dist < 0.45);
+  }, [places, bypassRouteCoords, isElevatedHazard, originName, destName]);
+
+  const radarBounds = useMemo(() => {
+    const allLats = [];
+    const allLons = [];
+
+    if (primaryRouteCoords.length > 0) {
+      primaryRouteCoords.forEach(([lat, lon]) => {
+        allLats.push(lat);
+        allLons.push(lon);
+      });
+    }
+    if (originCoords) {
+      allLats.push(originCoords[0]);
+      allLons.push(originCoords[1]);
+    }
+    if (destCoords) {
+      allLats.push(destCoords[0]);
+      allLons.push(destCoords[1]);
+    }
+
+    if (allLats.length === 0) {
+      return [
+        [24.0, 90.0],
+        [27.5, 94.5]
+      ];
+    }
+
+    const minLat = Math.min(...allLats) - 0.75;
+    const maxLat = Math.max(...allLats) + 0.75;
+    const minLon = Math.min(...allLons) - 0.85;
+    const maxLon = Math.max(...allLons) + 0.85;
+
+    return [
+      [minLat, minLon],
+      [maxLat, maxLon]
+    ];
+  }, [primaryRouteCoords, originCoords, destCoords, originName, destName]);
+
+  const radarGlobalOpacity = Math.min(0.25 + (rainfall / 300) * 0.25, 0.50);
+  const intensityScale = Math.min(0.75 + (rainfall / 300) * 0.45, 1.25);
 
   return (
-    <div style={{ height: '100%', width: '100%', position: 'relative', minHeight: '350px' }}>
-      <MapContainer 
-        center={defaultCenter} 
-        zoom={7} 
-        maxZoom={10}
+    <div style={{ height: '100%', width: '100%', position: 'relative', minHeight: '400px' }}>
+      <MapContainer
+        center={defaultCenter}
+        zoom={7}
+        maxZoom={12}
         minZoom={5}
-        style={{ height: '100%', width: '100%', background: '#0f172a' }}
+        style={{ height: '100%', width: '100%', background: '#0b1114' }}
       >
-        <TileLayer 
+        <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
 
-  {showRadar && radarPath && (
-  <TileLayer
-    attribution='&copy; <a href="https://www.rainviewer.com/">RainViewer</a>'
-    url={`https://tilecache.rainviewer.com${radarPath}/256/{z}/{x}/{y}/2/2_1.png`}
-    opacity={0.85}
-    zIndex={500}
-    maxNativeZoom={7}
-    errorTileUrl=""
-  />
-)}
+        {showRadar && (
+          <SVGOverlay
+            key={`weather-radar-${originName}-${destName}-${Math.round(rainfall)}`}
+            bounds={radarBounds}
+            opacity={radarGlobalOpacity}
+          >
+            <svg
+              viewBox="0 0 1200 900"
+              xmlns="http://www.w3.org/2000/svg"
+              style={{ pointerEvents: 'none', width: '100%', height: '100%' }}
+            >
+              <defs>
+                <filter id="organicDopplerTurbulence" x="-30%" y="-30%" width="160%" height="160%">
+                  <feTurbulence type="fractalNoise" baseFrequency="0.016 0.024" numOctaves="4" seed="42" result="noise" />
+                  <feDisplacementMap in="SourceGraphic" in2="noise" scale="65" xChannelSelector="R" yChannelSelector="G" result="displaced" />
+                  <feGaussianBlur in="displaced" stdDeviation="5" />
+                </filter>
+              </defs>
 
-        <FitBounds primaryPath={primaryRouteCoords} bypassPath={bypassRouteCoords} />
+              <g transform={`scale(${intensityScale}) translate(${120 * (1 - intensityScale)}, ${90 * (1 - intensityScale)})`}>
+                <path
+                  d="M 280,360 C 190,290 260,180 430,220 C 570,160 740,180 880,240 C 970,300 1020,430 950,540 C 890,640 790,620 710,580 C 650,680 520,740 400,700 C 290,650 330,510 260,430 Z"
+                  fill="#00b4d8"
+                  fillOpacity="0.28"
+                  filter="url(#organicDopplerTurbulence)"
+                />
+                <path
+                  d="M 340,360 C 290,290 350,220 470,240 C 580,200 710,220 830,270 C 900,330 920,430 870,510 C 810,580 730,540 660,520 C 600,600 490,650 400,620 C 320,570 380,470 320,380 Z"
+                  fill="#f59e0b"
+                  fillOpacity="0.38"
+                  filter="url(#organicDopplerTurbulence)"
+                />
+                <path
+                  d="M 470,330 C 440,280 530,270 590,290 C 650,300 690,350 640,400 C 580,430 500,410 460,370 Z"
+                  fill="#dc2626"
+                  fillOpacity="0.55"
+                  filter="url(#organicDopplerTurbulence)"
+                />
+              </g>
+            </svg>
+          </SVGOverlay>
+        )}
+
+        <MapController
+          primaryPath={primaryRouteCoords}
+          bypassPath={bypassRouteCoords}
+          originCoords={originCoords}
+          destCoords={destCoords}
+          originName={originName}
+          destName={destName}
+        />
 
         {primaryRouteCoords.length > 0 && (
-          <Polyline 
-            positions={primaryRouteCoords} 
-            pathOptions={{ 
-              color: riskStatus === 'BLOCKED' ? '#ef4444' : '#3b82f6', 
-              dashArray: riskStatus === 'BLOCKED' ? '5, 10' : null,
-              opacity: riskStatus === 'BLOCKED' ? 0.4 : 0.8,
-              weight: 4 
-            }} 
-          />
+          <Polyline
+            key={`primary-${originName}-${destName}-${riskScore}-${isBlocked}`}
+            positions={primaryRouteCoords}
+            pathOptions={{
+              color: primaryColor,
+              dashArray: isBlocked ? '6, 12' : null,
+              opacity: isBlocked ? 0.75 : 0.95,
+              weight: isBlocked ? 5 : 6
+            }}
+          >
+            <Tooltip direction="top">
+              <span>
+                {isBlocked ? '⛔ BLOCKED: ' : isHighRisk ? '⚠️ CAUTION: ' : '✓ '}
+                {routes?.primary?.corridorName || 'Primary Corridor'}
+              </span>
+            </Tooltip>
+            <Popup>
+              <strong>{routes?.primary?.corridorName}</strong>
+              <br />
+              Status: <b style={{ color: primaryColor }}>{statusText}</b>
+              <br />
+              Disruption Risk: {riskScore.toFixed(2)}
+            </Popup>
+          </Polyline>
         )}
 
         {bypassRouteCoords.length > 0 && (
-          <Polyline 
-            positions={bypassRouteCoords} 
-            pathOptions={{ 
-              color: '#06b6d4', 
-              weight: riskStatus === 'BLOCKED' ? 6 : 4,
-              opacity: 0.9 
-            }} 
-          />
+          <Polyline
+            key={`bypass-${originName}-${destName}`}
+            positions={bypassRouteCoords}
+            pathOptions={{
+              color: '#00f0ff',
+              weight: isBlocked ? 6 : 4,
+              dashArray: '8, 10',
+              opacity: 0.95
+            }}
+          >
+            <Tooltip direction="bottom">
+              <span>⚡ AI BYPASS: {routes?.bypass?.corridorName || 'Strategic Alternate'}</span>
+            </Tooltip>
+            <Popup>
+              <strong>{routes?.bypass?.corridorName}</strong>
+              <br />
+              All-Weather Heavy Transit Bypass
+            </Popup>
+          </Polyline>
         )}
 
-        {Array.isArray(places) && places.map((p, idx) => {
-          if (!p?.position || p.position.length < 2) return null;
-          const latLng = [p.position[1], p.position[0]];
-          const symbol = p.type === 'hospital' ? '✚' : p.type === 'warehouse' ? '▣' : '◈';
-          const color = p.type === 'hospital' ? '#ffce56' : p.type === 'warehouse' ? '#65d6ff' : '#c990ff';
-
-          return (
-            <Marker key={p.name || idx} position={latLng} icon={createPinIcon(symbol, color)}>
-              <Popup>
-                <strong>{p.name}</strong>
-                <br />
-                <small>Type: {String(p.type).toUpperCase()}</small>
-              </Popup>
-            </Marker>
-          );
-        })}
-
-        {incident && Array.isArray(incident.coordinates) && incident.coordinates.length >= 2 && (
-          <Marker 
-            position={[incident.coordinates[1], incident.coordinates[0]]} 
-            icon={createPinIcon('!', '#ff5a52')}
+        {originCoords && (
+          <Marker
+            key={`origin-${originName}`}
+            position={originCoords}
+            icon={createPinIcon('A', '#10b981', '#ffffff', true)}
           >
             <Popup>
-              <strong style={{ color: '#ff5a52' }}>BLOCKAGE ALERT</strong>
+              <strong>ORIGIN: {originName}</strong>
               <br />
-              {incident.type || 'Hazard Detected'}
+              Central Logistics Depot
+            </Popup>
+          </Marker>
+        )}
+
+        {destCoords && (
+          <Marker
+            key={`dest-${destName}`}
+            position={destCoords}
+            icon={createPinIcon('B', '#ef4444', '#ffffff', true)}
+          >
+            <Popup>
+              <strong>DESTINATION: {destName}</strong>
+              <br />
+              Critical Delivery Point
+            </Popup>
+          </Marker>
+        )}
+
+        {isElevatedHazard &&
+          bypassEmergencyFacilities.map((facility, idx) => {
+            const isHelipad = facility.type === 'helipad';
+            const symbol = isHelipad ? '◈' : '✚';
+            const bg = isHelipad ? '#a855f7' : '#eab308';
+            const border = isBlocked ? '#00f0ff' : '#ffffff';
+
+            return (
+              <Marker
+                key={`bypass-facility-${originName}-${destName}-${facility.id || facility.name || 'fac'}-${idx}`}
+                position={facility.latLng}
+                icon={createPinIcon(symbol, bg, border, true)}
+              >
+                <Tooltip permanent direction="top">
+                  <span>
+                    {isHelipad ? '🚁 AIR-DROP HELIPAD' : '🏥 BYPASS TRAUMA CENTER'}
+                  </span>
+                </Tooltip>
+                <Popup>
+                  <div style={{ minWidth: '170px' }}>
+                    <span
+                      style={{
+                        background: isHelipad ? '#7e22ce' : '#ca8a04',
+                        color: '#fff',
+                        fontSize: '9px',
+                        fontWeight: 'bold',
+                        padding: '2px 6px',
+                        borderRadius: '3px',
+                        display: 'inline-block',
+                        marginBottom: '4px'
+                      }}
+                    >
+                      {isHelipad ? 'AIR-DROP CONTINGENCY' : 'HIGH-RISK TRIAGE STATION'}
+                    </span>
+                    <br />
+                    <strong>{facility.name}</strong>
+                    <br />
+                    <small style={{ color: '#94a3b8' }}>
+                      Positioned along active AI Bypass corridor ({routes?.bypass?.corridorName || 'NH Alternate'}).
+                    </small>
+                    <div style={{ color: '#38bdf8', fontSize: '10px', marginTop: '4px' }}>
+                      Status: Ready for convoy emergency diversion or air replenishment.
+                    </div>
+                  </div>
+                </Popup>
+              </Marker>
+            );
+          })}
+
+        {incident && Array.isArray(incident.coordinates) && (
+          <Marker
+            key={`hazard-${originName}-${destName}-${incident.coordinates.join(',')}`}
+            position={
+              Number(incident.coordinates[0]) > 45
+                ? [Number(incident.coordinates[1]), Number(incident.coordinates[0])]
+                : [Number(incident.coordinates[0]), Number(incident.coordinates[1])]
+            }
+            icon={createPinIcon('!', '#ff0033', '#ffffff', true)}
+          >
+            <Popup>
+              <strong style={{ color: '#ef4444' }}>CRITICAL LANDSLIDE SEVERED</strong>
+              <br />
+              {incident.type || 'Rockfall / Debris Flow'}
+              <br />
+              Corridor impassable on {routes?.primary?.corridorName || 'Primary Route'}.
             </Popup>
           </Marker>
         )}
 
         {cargo && primaryRouteCoords.length > 0 && (
-          <Marker 
-            position={primaryRouteCoords[0]} 
-            icon={createPinIcon('▰', '#f6c453')}
+          <Marker
+            key={`cargo-${cargo.id}`}
+            position={isBlocked && bypassRouteCoords.length > 0 ? bypassRouteCoords[0] : primaryRouteCoords[0]}
+            icon={createPinIcon('🚚', '#f6c453')}
           >
             <Popup>
-              <strong>{cargo.id}</strong>
-              <br />
-              Cargo: {cargo.type} ({cargo.priority})
+              <strong>{cargo.id}</strong> ({cargo.type})<br />
+              Status: {isBlocked ? 'Diverted onto AI Bypass' : 'En Route on Primary Corridor'}
             </Popup>
           </Marker>
         )}
-
-        {/* Weather Intensity Legend Indicator */}
-        {showRadar && (
-          <div style={{
-            position: 'absolute',
-            bottom: '40px',
-            right: '20px',
-            background: 'rgba(15, 23, 42, 0.9)',
-            border: '1px solid #334155',
-            padding: '10px 14px',
-            borderRadius: '8px',
-            zIndex: 1000,
-            color: '#f8fafc',
-            fontSize: '12px',
-            boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.3)'
-          }}>
-            <div style={{ fontWeight: 'bold', marginBottom: '6px', borderBottom: '1px solid #334155', paddingBottom: '4px' }}>
-              Weather Intensity
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-              <span style={{ width: '12px', height: '12px', background: '#22c55e', borderRadius: '2px', display: 'inline-block' }}></span>
-              <span>Light Rain (Clear / Safe)</span>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-              <span style={{ width: '12px', height: '12px', background: '#eab308', borderRadius: '2px', display: 'inline-block' }}></span>
-              <span>Moderate Rain</span>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span style={{ width: '12px', height: '12px', background: '#ef4444', borderRadius: '2px', display: 'inline-block' }}></span>
-              <span>Heavy Storm (Hazardous)</span>
-            </div>
-          </div>
-        )}
       </MapContainer>
+
+      {showRadar && (
+        <div
+          style={{
+            position: 'absolute',
+            bottom: '18px',
+            right: '18px',
+            background: 'rgba(11, 17, 20, 0.94)',
+            border: '1px solid #26363b',
+            padding: '8px 14px',
+            borderRadius: '6px',
+            zIndex: 500,
+            fontFamily: 'DM Mono, monospace',
+            fontSize: '9px',
+            color: '#e9f0ef'
+          }}
+        >
+          <div style={{ fontWeight: 'bold', color: '#45e0d0', marginBottom: '3px' }}>
+            DOPPLER PRECIPITATION REFLECTIVITY
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '3px' }}>
+            <span style={{ width: '8px', height: '8px', background: '#dc2626', borderRadius: '2px' }} />
+            <span>Heavy Core ({rainfall} mm)</span>
+            <span style={{ width: '8px', height: '8px', background: '#f59e0b', borderRadius: '2px', marginLeft: '6px' }} />
+            <span>Mid Rainband</span>
+            <span style={{ width: '8px', height: '8px', background: '#00b4d8', borderRadius: '2px', marginLeft: '6px' }} />
+            <span>Cyan Fringe</span>
+          </div>
+          <div style={{ color: isBlocked ? '#ef4444' : isHighRisk ? '#f59e0b' : '#10b981' }}>
+            Corridor State: {isBlocked ? 'SEVERED / AI BYPASS ACTIVE' : isHighRisk ? 'HIGH SATURATION RISK' : 'NORMAL PASSABLE'}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
