@@ -34,9 +34,25 @@ def health():
 
 @app.post('/predict')
 def predict(payload: RiskInput):
-    values = [[payload.rainfall_24h, payload.soil_moisture, payload.slope_angle, payload.elevation, payload.road_condition]]
-    score = round(float(model.predict(values)[0]), 2)
-    return {'riskScore': score, 'classification': classify(score)}
+    values = [[
+        payload.rainfall_24h,
+        payload.soil_moisture,
+        payload.slope_angle,
+        payload.elevation,
+        payload.road_condition
+    ]]
+
+    print("INPUT:", values)
+
+    predicted = model.predict(values)[0]
+    print("PREDICTED SCORE:", predicted)
+
+    score = round(float(predicted), 2)
+
+    return {
+        'riskScore': score,
+        'classification': classify(score)
+    }
 
 if __name__ == '__main__':
     import uvicorn

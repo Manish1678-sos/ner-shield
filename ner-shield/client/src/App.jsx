@@ -16,14 +16,14 @@ const demoPlaces = [
 ]; 
 
 const CITY_COORDS = {
-  'Guwahati': [91.7362, 26.1445],
-  'Shillong': [91.8933, 25.5788],
-  'Silchar': [92.7789, 24.8333],
-  'Imphal': [93.9368, 24.8170],
-  'Aizawl': [92.7176, 23.7271],
-  'Kohima': [94.1086, 25.6751],
-  'Agartala': [91.2868, 23.8315],
-  'Siliguri': [88.3953, 26.7271]
+  'Guwahati': [26.1445, 91.7362],
+  'Shillong': [25.5788, 91.8933],
+  'Silchar': [24.8333, 92.7789],
+  'Imphal': [24.8170, 93.9368],
+  'Aizawl': [23.7271, 92.7176],
+  'Kohima': [25.6751, 94.1086],
+  'Agartala': [23.8315, 91.2868],
+  'Siliguri': [26.7271, 88.3953]
 };
 
 const defaultRouteStructure = {
@@ -45,6 +45,10 @@ export default function App() {
   const [toast, setToast] = useState('');
   const [cargo, setCargo] = useState({ id: 'CVY-2048', type: 'Vaccines', priority: 'P1', temperature: '+4.1 C', eta: 165, location: 'Guwahati' });
   const [active, setActive] = useState('primary');
+  
+  // New States for Menu and Weather Radar Functionality
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [showRadar, setShowRadar] = useState(false);
 
   useEffect(() => {
     api.get('/demo/state')
@@ -91,15 +95,14 @@ export default function App() {
     try {
       let currentRisk = metrics.risk || 0.24;
 
-      // 1. Try FastAPI risk calculation
       try {
-        const mlResponse = await fetch('http://127.0.0.1:8000/predict', {
+        const mlResponse = await fetch('http://127.0.0.1:8000/api/v1/calculate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             rainfall_24h: Number(metrics.rainfall) || 80,
             soil_moisture: Number(metrics.soil) || 50,
-            slope_angle: Number(metrics.slope) || 15,
+            slope_angle: Number(metrics.slope) || 18,
             elevation: 1200.0,
             road_condition: 0.8
           })
@@ -107,16 +110,19 @@ export default function App() {
 
         if (mlResponse.ok) {
           const mlData = await mlResponse.json();
-          if (mlData && typeof mlData.riskScore === 'number') {
-            currentRisk = mlData.riskScore;
-            setMetrics(m => ({ ...m, risk: currentRisk }));
+          let computedRisk = mlData.risk ?? mlData.primary?.risk ?? mlData.score;
+          
+          if (!computedRisk || computedRisk === 0) {
+            computedRisk = Number(((metrics.rainfall / 300) * 0.6 + (metrics.soil / 100) * 0.4).toFixed(2));
           }
+
+          currentRisk = computedRisk;
+          setMetrics(m => ({ ...m, risk: currentRisk }));
         }
       } catch (err) {
-        console.warn('FastAPI engine offline, fallback active');
+        console.warn('FastAPI engine error:', err);
       }
 
-      // 2. Safe coordinate route builder
       const start = CITY_COORDS[origin] || CITY_COORDS['Guwahati'];
       const end = CITY_COORDS[destination] || CITY_COORDS['Silchar'];
       const midPrimary = [(start[0] + end[0]) / 2, (start[1] + end[1]) / 2];
@@ -129,8 +135,8 @@ export default function App() {
             geometry: { type: 'LineString', coordinates: [start, midPrimary, end] },
             coordinates: [start, midPrimary, end]
           },
-          eta: 345,
-          distance: 218,
+          eta: 269,
+          distance: 179.5,
           risk: currentRisk
         },
         bypass: {
@@ -139,8 +145,8 @@ export default function App() {
             geometry: { type: 'LineString', coordinates: [start, midBypass, end] },
             coordinates: [start, midBypass, end]
           },
-          eta: 390,
-          distance: 242,
+          eta: 352,
+          distance: 186.5,
           risk: Math.max(0.05, Number((currentRisk - 0.15).toFixed(2)))
         }
       };
@@ -148,6 +154,7 @@ export default function App() {
       try {
         const { data } = await api.post('/routes/calculate', { origin, destination, priority, metrics });
         if (data && data.primary && data.bypass) {
+          data.primary.risk = currentRisk;
           setRoutes(data);
         } else {
           setRoutes(safeFallbackRoute);
@@ -202,12 +209,13 @@ export default function App() {
       if (data?.incident) setIncident(data.incident);
       if (data?.routes) setRoutes(data.routes);
       if (data?.risk?.riskScore) {
-        setMetrics({
-          rainfall: metrics.rainfall + 100,
-          soil: Math.min(98, metrics.soil + 30),
+        setMetrics(m => ({
+          ...m,
+          rainfall: m.rainfall + 100,
+          soil: Math.min(98, m.soil + 30),
           slope: 32,
           risk: data.risk.riskScore
-        });
+        }));
       }
       setCargo(c => ({ ...c, eta: data?.routes?.bypass?.eta || 390, location: 'AI BYPASS ROUTE' }));
       setActive('bypass');
@@ -252,11 +260,17 @@ export default function App() {
             <span className="avatar">AR</span>
             <span><b>ANANYA RAO</b><small>COMMAND OFFICER</small></span>
           </span>
-          <button className="icon-btn mobile-menu"><Menu size={18}/></button>
+          {/* Mobile Menu Hamburger Toggle */}
+          <button 
+            className="icon-btn mobile-menu" 
+            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+          >
+            <Menu size={18}/>
+          </button>
         </div>
       </header>
 
-      <main className="workspace">
+      <main className={`workspace ${mobileMenuOpen ? 'mobile-sidebar-open' : ''}`}>
         <aside className="sidebar">
           <div className="section-label">
             <span>ROUTE DISPATCH</span>
@@ -397,12 +411,24 @@ export default function App() {
             </div>
             <div className="map-tools">
               <button className="tool-active"><span className="map-dot cyan"/> ROUTE LAYERS</button>
-              <button><CloudRain size={15}/> WEATHER RADAR</button>
+              {/* Weather Radar Toggle Button */}
+              <button 
+                className={showRadar ? 'tool-active' : ''} 
+                onClick={() => setShowRadar(!showRadar)}
+              >
+                <CloudRain size={15}/> WEATHER RADAR
+              </button>
             </div>
           </div>
 
           <div className="map-wrap">
-            <MapView routes={routes} places={places} incident={incident} cargo={cargo}/>
+            <MapView 
+              routes={routes} 
+              places={places} 
+              incident={incident} 
+              cargo={cargo} 
+              showRadar={showRadar} 
+            />
             
             <div className="map-legend">
               <span><i className="legend-line primary"/> PRIMARY</span>

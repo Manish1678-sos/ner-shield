@@ -57,7 +57,7 @@ function FitBounds({ primaryPath, bypassPath }) {
       map.invalidateSize();
       const combined = [...primaryPath, ...bypassPath];
       if (combined.length > 0) {
-        map.fitBounds(combined, { padding: [40, 40], maxZoom: 9 });
+        map.fitBounds(combined, { padding: [40, 40], maxZoom: 8 });
       }
     } catch (e) {}
   }, [primaryPath, bypassPath, map]);
@@ -67,18 +67,19 @@ function FitBounds({ primaryPath, bypassPath }) {
 
 export default function MapView({ routes, places, incident, cargo, showRadar }) {
   const [radarPath, setRadarPath] = useState(null);
-  const primaryPath = extractLatLng(routes?.primary);
-  const bypassPath = extractLatLng(routes?.bypass);
-  const defaultCenter = primaryPath.length > 0 ? primaryPath[0] : [26.1445, 91.7362];
+  
+  const primaryRouteCoords = extractLatLng(routes?.primary);
+  const bypassRouteCoords = extractLatLng(routes?.bypass);
+  const defaultCenter = primaryRouteCoords.length > 0 ? primaryRouteCoords[0] : [26.1445, 91.7362];
 
-  // Fetch the latest valid radar timestamp from RainViewer API
+  const riskStatus = (routes?.primary?.risk > 0.7 || incident) ? 'BLOCKED' : 'NORMAL';
+
   useEffect(() => {
     if (showRadar) {
       fetch('https://api.rainviewer.com/public/weather-maps.json')
         .then((res) => res.json())
         .then((data) => {
           if (data && data.radar && data.radar.past && data.radar.past.length > 0) {
-            // Get the most recent timestamp
             const latestFrame = data.radar.past[data.radar.past.length - 1];
             setRadarPath(latestFrame.path);
           }
@@ -92,43 +93,51 @@ export default function MapView({ routes, places, incident, cargo, showRadar }) 
       <MapContainer 
         center={defaultCenter} 
         zoom={7} 
+        maxZoom={10}
+        minZoom={5}
         style={{ height: '100%', width: '100%', background: '#0f172a' }}
       >
-        {/* Base Map */}
         <TileLayer 
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
 
-        {/* Dynamic Weather Radar Layer */}
-        {showRadar && radarPath && (
-          <TileLayer
-            attribution='&copy; <a href="https://www.rainviewer.com/">RainViewer</a>'
-            url={`https://tilecache.rainviewer.com${radarPath}/256/{z}/{x}/{y}/2/1_1.png`}
-            opacity={0.65}
-            zIndex={500}
-          />
-        )}
+  {showRadar && radarPath && (
+  <TileLayer
+    attribution='&copy; <a href="https://www.rainviewer.com/">RainViewer</a>'
+    url={`https://tilecache.rainviewer.com${radarPath}/256/{z}/{x}/{y}/2/2_1.png`}
+    opacity={0.85}
+    zIndex={500}
+    maxNativeZoom={7}
+    errorTileUrl=""
+  />
+)}
 
-        <FitBounds primaryPath={primaryPath} bypassPath={bypassPath} />
+        <FitBounds primaryPath={primaryRouteCoords} bypassPath={bypassRouteCoords} />
 
-        {/* Primary Route */}
-        {primaryPath.length > 1 && (
+        {primaryRouteCoords.length > 0 && (
           <Polyline 
-            positions={primaryPath} 
-            pathOptions={{ color: '#ff5a52', weight: 5, opacity: 0.9 }} 
+            positions={primaryRouteCoords} 
+            pathOptions={{ 
+              color: riskStatus === 'BLOCKED' ? '#ef4444' : '#3b82f6', 
+              dashArray: riskStatus === 'BLOCKED' ? '5, 10' : null,
+              opacity: riskStatus === 'BLOCKED' ? 0.4 : 0.8,
+              weight: 4 
+            }} 
           />
         )}
 
-        {/* Bypass Route */}
-        {bypassPath.length > 1 && (
+        {bypassRouteCoords.length > 0 && (
           <Polyline 
-            positions={bypassPath} 
-            pathOptions={{ color: '#45e0d0', weight: 4, dashArray: '8, 12', opacity: 0.9 }} 
+            positions={bypassRouteCoords} 
+            pathOptions={{ 
+              color: '#06b6d4', 
+              weight: riskStatus === 'BLOCKED' ? 6 : 4,
+              opacity: 0.9 
+            }} 
           />
         )}
 
-        {/* Facilities */}
         {Array.isArray(places) && places.map((p, idx) => {
           if (!p?.position || p.position.length < 2) return null;
           const latLng = [p.position[1], p.position[0]];
@@ -146,7 +155,6 @@ export default function MapView({ routes, places, incident, cargo, showRadar }) 
           );
         })}
 
-        {/* Hazards */}
         {incident && Array.isArray(incident.coordinates) && incident.coordinates.length >= 2 && (
           <Marker 
             position={[incident.coordinates[1], incident.coordinates[0]]} 
@@ -160,10 +168,9 @@ export default function MapView({ routes, places, incident, cargo, showRadar }) 
           </Marker>
         )}
 
-        {/* Cargo Position */}
-        {cargo && primaryPath.length > 0 && (
+        {cargo && primaryRouteCoords.length > 0 && (
           <Marker 
-            position={primaryPath[0]} 
+            position={primaryRouteCoords[0]} 
             icon={createPinIcon('▰', '#f6c453')}
           >
             <Popup>
@@ -172,6 +179,39 @@ export default function MapView({ routes, places, incident, cargo, showRadar }) 
               Cargo: {cargo.type} ({cargo.priority})
             </Popup>
           </Marker>
+        )}
+
+        {/* Weather Intensity Legend Indicator */}
+        {showRadar && (
+          <div style={{
+            position: 'absolute',
+            bottom: '40px',
+            right: '20px',
+            background: 'rgba(15, 23, 42, 0.9)',
+            border: '1px solid #334155',
+            padding: '10px 14px',
+            borderRadius: '8px',
+            zIndex: 1000,
+            color: '#f8fafc',
+            fontSize: '12px',
+            boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.3)'
+          }}>
+            <div style={{ fontWeight: 'bold', marginBottom: '6px', borderBottom: '1px solid #334155', paddingBottom: '4px' }}>
+              Weather Intensity
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+              <span style={{ width: '12px', height: '12px', background: '#22c55e', borderRadius: '2px', display: 'inline-block' }}></span>
+              <span>Light Rain (Clear / Safe)</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+              <span style={{ width: '12px', height: '12px', background: '#eab308', borderRadius: '2px', display: 'inline-block' }}></span>
+              <span>Moderate Rain</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ width: '12px', height: '12px', background: '#ef4444', borderRadius: '2px', display: 'inline-block' }}></span>
+              <span>Heavy Storm (Hazardous)</span>
+            </div>
+          </div>
         )}
       </MapContainer>
     </div>
