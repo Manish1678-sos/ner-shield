@@ -4,6 +4,7 @@ FastAPI & Socket.IO ASGI Root Entry Point (MDoNER / SIH 2026)
 """
 
 from contextlib import asynccontextmanager
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -59,14 +60,29 @@ fastapi_app = FastAPI(
     redoc_url="/redoc",
 )
 
+# Build dynamic allowed origins
+allowed_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://ner-shield-logistics.netlify.app",
+]
+
+env_cors = os.getenv("CORS_ORIGINS", "")
+if env_cors:
+    if env_cors == "*":
+        allowed_origins = ["*"]
+    else:
+        for origin in env_cors.split(","):
+            cleaned = origin.strip()
+            if cleaned and cleaned not in allowed_origins:
+                allowed_origins.append(cleaned)
+
 fastapi_app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=allowed_origins,
+    allow_origin_regex=r"https://.*--ner-shield-logistics\.netlify\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -90,16 +106,18 @@ class RiskPredictRequest(BaseModel):
 async def predict_risk(payload: RiskPredictRequest):
     try:
         try:
+            # Try positional arguments first
             score = ml_service.predict_risk(
-                rainfall_mm=payload.rainfall_24h,
-                soil_moisture=payload.soil_moisture,
-                slope_angle=payload.slope_angle,
-                elevation=payload.elevation,
-                road_condition=payload.road_condition,
+                payload.rainfall_24h,
+                payload.soil_moisture,
+                payload.slope_angle,
+                payload.elevation,
+                payload.road_condition,
             )
         except TypeError:
+            # Fall back to named rainfall_mm argument
             score = ml_service.predict_risk(
-                rainfall_24h=payload.rainfall_24h,
+                rainfall_mm=payload.rainfall_24h,
                 soil_moisture=payload.soil_moisture,
                 slope_angle=payload.slope_angle,
                 elevation=payload.elevation,
@@ -108,7 +126,16 @@ async def predict_risk(payload: RiskPredictRequest):
     except Exception as exc:
         print(f"[ML Risk Engine Fallback] {exc}")
         score = round(
-            min(1.0, (payload.rainfall_24h * 0.0025 + payload.soil_moisture * 0.004 + payload.slope_angle * 0.012 + payload.elevation * 0.00012 + payload.road_condition * 0.18)),
+            min(
+                1.0,
+                (
+                    payload.rainfall_24h * 0.0025
+                    + payload.soil_moisture * 0.004
+                    + payload.slope_angle * 0.012
+                    + payload.elevation * 0.00012
+                    + payload.road_condition * 0.18
+                ),
+            ),
             2,
         )
 
@@ -116,11 +143,19 @@ async def predict_risk(payload: RiskPredictRequest):
         return score
 
     val = round(float(score), 2)
-    classification = "BLOCKED" if val > 0.8 else "HIGH RISK" if val > 0.6 else "MODERATE" if val > 0.3 else "SAFE"
+    classification = (
+        "BLOCKED"
+        if val > 0.8
+        else "HIGH RISK"
+        if val > 0.6
+        else "MODERATE"
+        if val > 0.3
+        else "SAFE"
+    )
     return {
         "riskScore": val,
         "risk": val,
-        "classification": classification
+        "classification": classification,
     }
 
 
