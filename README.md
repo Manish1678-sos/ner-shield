@@ -1,4 +1,5 @@
 # NER-SHIELD - MDoNER Logistics Grid
+Live on:http://ner-shield-logistics.netlify.app/
 
 A hackathon-ready emergency logistics command center. **DEMO DATA** is clearly marked in the UI.
 
