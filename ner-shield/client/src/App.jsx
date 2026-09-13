@@ -31,16 +31,43 @@ const emptyRoute = {
   bypass: { geojson: { coordinates: [] }, eta: 0, distance: 0, risk: 0, corridorName: '' }
 };
 
-// Check if primary and bypass share identical geometry
-function isSameRoute(routeA, routeB) {
+// Check if a point is within ~15 km of any segment along a polyline
+export function isPointNearPolyline(point, polyline, thresholdDeg = 0.12) {
+  if (!point || !polyline || !polyline.length) return false;
+  const pLon = Number(point[0]) > 45 ? Number(point[0]) : Number(point[1]);
+  const pLat = Number(point[0]) > 45 ? Number(point[1]) : Number(point[0]);
+
+  return polyline.some((coord) => {
+    const cLon = Number(coord[0]) > 45 ? Number(coord[0]) : Number(coord[1]);
+    const cLat = Number(coord[0]) > 45 ? Number(coord[1]) : Number(coord[0]);
+    return Math.hypot(pLon - cLon, pLat - cLat) < thresholdDeg;
+  });
+}
+
+// Check if two routes use the same physical highway corridor
+export function isSameCorridor(routeA, routeB) {
   const coordsA = routeA?.geojson?.coordinates || routeA?.coordinates || [];
   const coordsB = routeB?.geojson?.coordinates || routeB?.coordinates || [];
   if (!coordsA.length || !coordsB.length) return true;
-  if (coordsA.length !== coordsB.length) return false;
-  const midA = coordsA[Math.floor(coordsA.length / 2)];
-  const midB = coordsB[Math.floor(coordsB.length / 2)];
-  if (!midA || !midB) return true;
-  return Math.hypot(midA[0] - midB[0], midA[1] - midB[1]) < 0.005;
+
+  const distA = Number(routeA?.distance) || 0;
+  const distB = Number(routeB?.distance) || 0;
+
+  // If total distance is within 8%, it is the same arterial highway
+  if (distA > 0 && distB > 0 && Math.abs(distA - distB) / Math.max(distA, distB) < 0.08) {
+    return true;
+  }
+
+  // Sample 10 points along Route A and check if 70%+ lie on Route B
+  let matches = 0;
+  const samples = 10;
+  for (let i = 0; i < samples; i++) {
+    const idx = Math.floor((i / (samples - 1)) * (coordsA.length - 1));
+    if (isPointNearPolyline(coordsA[idx], coordsB, 0.10)) {
+      matches++;
+    }
+  }
+  return matches / samples >= 0.7;
 }
 
 export default function App() {
@@ -73,8 +100,11 @@ export default function App() {
   routesRef.current = routes;
 
   const isPrimaryBlocked = metrics.risk > 0.8 || Boolean(incident);
-  const isDuplicateRoute = isSameRoute(routes?.primary, routes?.bypass);
-  const hasValidBypass = !isDuplicateRoute && (routes?.bypass?.coordinates?.length > 0 || routes?.bypass?.geojson?.coordinates?.length > 0);
+  const bypassMatchesPrimary = isSameCorridor(routes?.primary, routes?.bypass);
+  const bypassHitsIncident = incident?.coordinates
+    ? isPointNearPolyline(incident.coordinates, routes?.bypass?.coordinates || routes?.bypass?.geojson?.coordinates || [])
+    : false;
+  const isBypassSevered = isPrimaryBlocked && (bypassMatchesPrimary || bypassHitsIncident);
 
   useEffect(() => {
     fetchOsmFacilities().then((osmPlaces) => {
@@ -149,6 +179,7 @@ export default function App() {
         setMetrics((m) => ({ ...m, risk: computedRisk }));
 
         const drivingData = await fetchRealDrivingRoute(currentOrigin, currentDest);
+        const identical = isSameCorridor(drivingData.primary, drivingData.bypass);
 
         setRoutes({
           primary: {
@@ -168,10 +199,12 @@ export default function App() {
               geometry: { type: 'LineString', coordinates: drivingData.bypass.coordinates },
               coordinates: drivingData.bypass.coordinates
             },
-            eta: drivingData.bypass.eta,
-            distance: drivingData.bypass.distance,
-            risk: Math.max(0.06, Number((computedRisk - 0.22).toFixed(2))),
-            corridorName: drivingData.bypass.corridorName
+            eta: identical && computedRisk > 0.8 ? '--' : drivingData.bypass.eta,
+            distance: identical && computedRisk > 0.8 ? '--' : drivingData.bypass.distance,
+            risk: identical ? computedRisk : Math.max(0.06, Number((computedRisk - 0.22).toFixed(2))),
+            corridorName: identical && computedRisk > 0.8
+              ? 'NO ALTERNATE BYPASS AVAILABLE'
+              : drivingData.bypass.corridorName
           }
         });
 
@@ -198,13 +231,17 @@ export default function App() {
   }
 
   async function simulateLandslide() {
-    const primaryPts = routesRef.current?.primary?.geojson?.coordinates || [];
-    let slideCoords = [92.361, 25.124];
+    const primaryPts = routesRef.current?.primary?.geojson?.coordinates || routesRef.current?.primary?.coordinates || [];
+    const bypassPts = routesRef.current?.bypass?.geojson?.coordinates || routesRef.current?.bypass?.coordinates || [];
 
+    let slideCoords = [92.361, 25.124];
     if (primaryPts.length > 4) {
       const midIdx = Math.floor(primaryPts.length * 0.52);
       slideCoords = primaryPts[midIdx];
     }
+
+    const samePath = isSameCorridor(routesRef.current?.primary, routesRef.current?.bypass);
+    const bypassBlocked = samePath || isPointNearPolyline(slideCoords, bypassPts, 0.12);
 
     const payload = {
       incident_type: 'LANDSLIDE',
@@ -227,41 +264,47 @@ export default function App() {
 
     setMetrics((m) => ({ ...m, rainfall: 280, soil: 95, risk: 0.95 }));
     setIncident({ type: 'Major Rockslide & Mudflow', coordinates: slideCoords });
-    setActive('bypass');
 
-    const duplicate = isSameRoute(routesRef.current?.primary, routesRef.current?.bypass);
-
-    if (duplicate) {
-      // Both routes traverse the identical severed road
+    if (bypassBlocked) {
+      // Both primary and secondary routes traverse the blocked corridor
       setRoutes((r) => ({
         ...r,
         primary: { ...r.primary, risk: 0.95 },
-        bypass: { ...r.bypass, risk: 0.95, corridorName: 'NO ALTERNATE BYPASS AVAILABLE' }
+        bypass: {
+          ...r.bypass,
+          risk: 0.95,
+          eta: '--',
+          distance: '--',
+          corridorName: 'NO ALTERNATE BYPASS (CORRIDOR SEVERED)'
+        }
       }));
+      setActive('primary');
       setCargo((c) => ({
         ...c,
         eta: '--',
-        location: 'CONVOY HALTED · ALL ARTERIAL ROADS SEVERED'
+        location: 'HALTED · ALL HIGHWAYS SEVERED'
       }));
-      setToast('CRITICAL: ROAD SEVERED & NO ALTERNATE BYPASS EXISTS');
+      setToast('CRITICAL: ALL ARTERIAL ROADS SEVERED · NO BYPASS AVAILABLE');
     } else {
+      // Physically distinct bypass exists (e.g., Guwahati -> Silchar via NH-27 Haflong)
       setRoutes((r) => ({
         ...r,
         primary: { ...r.primary, risk: 0.95 },
         bypass: { ...r.bypass, risk: 0.12 }
       }));
+      setActive('bypass');
       setCargo((c) => ({
         ...c,
         eta: routesRef.current?.bypass?.eta || 395,
         location: 'AI STRATEGIC BYPASS'
       }));
-      setToast('LANDSLIDE PERSISTED · CONVOY REROUTED VIA AI BYPASS');
+      setToast('LANDSLIDE LOGGED · CONVOY REROUTED VIA BYPASS');
     }
 
     try {
       await api.post('/incidents', payload);
     } catch {
-      // Local simulation continues cleanly
+      // Local fallback active
     }
   }
 
@@ -285,6 +328,10 @@ export default function App() {
       }
     }
 
+    const bypassPts = routesRef.current?.bypass?.geojson?.coordinates || routesRef.current?.bypass?.coordinates || [];
+    const samePath = isSameCorridor(routesRef.current?.primary, routesRef.current?.bypass);
+    const bypassBlocked = samePath || isPointNearPolyline([lon, lat], bypassPts, 0.12);
+
     const rawType = f ? String(f.get('type') || 'Landslide') : 'Landslide';
     const payload = {
       incident_type: 'LANDSLIDE',
@@ -307,29 +354,34 @@ export default function App() {
 
     setIncident({ type: rawType, coordinates: [lon, lat] });
     setMetrics((m) => ({ ...m, risk: 0.96 }));
-    setActive('bypass');
     setDrawer(false);
 
-    const duplicate = isSameRoute(routesRef.current?.primary, routesRef.current?.bypass);
-
-    if (duplicate) {
+    if (bypassBlocked) {
       setRoutes((r) => ({
         ...r,
         primary: { ...r.primary, risk: 0.96 },
-        bypass: { ...r.bypass, risk: 0.96, corridorName: 'NO ALTERNATE BYPASS AVAILABLE' }
+        bypass: {
+          ...r.bypass,
+          risk: 0.96,
+          eta: '--',
+          distance: '--',
+          corridorName: 'NO ALTERNATE BYPASS (CORRIDOR SEVERED)'
+        }
       }));
+      setActive('primary');
       setCargo((c) => ({
         ...c,
         eta: '--',
-        location: 'CONVOY HALTED · NO BYPASS AVAILABLE'
+        location: 'HALTED · ALL HIGHWAYS SEVERED'
       }));
-      setToast('HAZARD LOGGED: CORRIDOR SEVERED · NO DETOUR AVAILABLE');
+      setToast('CRITICAL: ROAD SEVERED · NO BYPASS AVAILABLE');
     } else {
       setRoutes((r) => ({
         ...r,
         primary: { ...r.primary, risk: 0.96 },
         bypass: { ...r.bypass, risk: 0.10 }
       }));
+      setActive('bypass');
       setCargo((c) => ({
         ...c,
         eta: routesRef.current?.bypass?.eta || 395,
@@ -341,7 +393,7 @@ export default function App() {
     try {
       await api.post('/incidents', payload);
     } catch {
-      // Local simulation continues cleanly
+      // Local fallback active
     }
   }
 
@@ -526,17 +578,9 @@ export default function App() {
             onClick={() => setActive('primary')}
           />
           <RouteCard
-            title={
-              isPrimaryBlocked && isDuplicateRoute
-                ? 'NO ALTERNATE BYPASS'
-                : routes?.bypass?.corridorName || 'AI STRATEGIC BYPASS'
-            }
-            route={
-              isPrimaryBlocked && isDuplicateRoute
-                ? { ...routes?.bypass, eta: '--', distance: '--', risk: routes?.primary?.risk || 0.95 }
-                : routes?.bypass
-            }
-            color={isPrimaryBlocked && isDuplicateRoute ? '#ef4444' : '#00f0ff'}
+            title={routes?.bypass?.corridorName || 'AI STRATEGIC BYPASS'}
+            route={routes?.bypass}
+            color={isBypassSevered ? '#ef4444' : '#00f0ff'}
             selected={active === 'bypass'}
             onClick={() => setActive('bypass')}
           />
@@ -552,14 +596,14 @@ export default function App() {
               <span className="temp">{cargo.temperature}</span>
             </div>
             <div className="cargo-progress">
-              <i style={{ width: isPrimaryBlocked && isDuplicateRoute ? '0%' : active === 'bypass' ? '50%' : '20%' }} />
+              <i style={{ width: isBypassSevered ? '0%' : active === 'bypass' ? '50%' : '20%' }} />
             </div>
             <div className="cargo-foot">
               <span>{cargo.location}</span>
               <span>
                 ETA{' '}
                 <b>
-                  {isPrimaryBlocked && isDuplicateRoute
+                  {isBypassSevered
                     ? 'HALTED'
                     : `${active === 'bypass' ? routes?.bypass?.eta : routes?.primary?.eta} min`}
                 </b>
@@ -618,11 +662,11 @@ export default function App() {
                 <i
                   className="legend-line"
                   style={{
-                    background: isPrimaryBlocked && isDuplicateRoute ? '#ef4444' : '#00f0ff',
-                    borderTop: `2px dashed ${isPrimaryBlocked && isDuplicateRoute ? '#ef4444' : '#00f0ff'}`
+                    background: isBypassSevered ? '#ef4444' : '#00f0ff',
+                    borderTop: `2px dashed ${isBypassSevered ? '#ef4444' : '#00f0ff'}`
                   }}
                 />{' '}
-                {isPrimaryBlocked && isDuplicateRoute ? 'BYPASS SEVERED' : 'AI BYPASS'}
+                {isBypassSevered ? 'BYPASS SEVERED' : 'AI BYPASS'}
               </span>
               <span><i className="legend-square blocked" /> BLOCKED</span>
               <span><i className="legend-dot hospital" /> FACILITY</span>
