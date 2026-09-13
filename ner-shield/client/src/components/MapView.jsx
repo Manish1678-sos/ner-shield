@@ -109,6 +109,16 @@ export default function MapView({
   const isHighRisk = riskScore > 0.45 && !isBlocked;
   const isElevatedHazard = isBlocked || isHighRisk;
 
+  // Determine whether bypass is merely an identical path
+  const isSamePath = useMemo(() => {
+    if (!primaryRouteCoords.length || !bypassRouteCoords.length) return true;
+    if (primaryRouteCoords.length !== bypassRouteCoords.length) return false;
+    const midA = primaryRouteCoords[Math.floor(primaryRouteCoords.length / 2)];
+    const midB = bypassRouteCoords[Math.floor(bypassRouteCoords.length / 2)];
+    if (!midA || !midB) return true;
+    return Math.hypot(midA[0] - midB[0], midA[1] - midB[1]) < 0.005;
+  }, [primaryRouteCoords, bypassRouteCoords]);
+
   let primaryColor = '#10b981';
   let statusText = 'SAFE / OPERATIONAL';
   if (isBlocked) {
@@ -234,7 +244,7 @@ export default function MapView({
 
         <MapController
           primaryPath={primaryRouteCoords}
-          bypassPath={bypassRouteCoords}
+          bypassPath={isBlocked && isSamePath ? [] : bypassRouteCoords}
           originCoords={originCoords}
           destCoords={destCoords}
           originName={originName}
@@ -248,8 +258,8 @@ export default function MapView({
             pathOptions={{
               color: primaryColor,
               dashArray: isBlocked ? '6, 12' : null,
-              opacity: isBlocked ? 0.75 : 0.95,
-              weight: isBlocked ? 5 : 6
+              opacity: isBlocked ? 0.85 : 0.95,
+              weight: isBlocked ? 6 : 6
             }}
           >
             <Tooltip direction="top">
@@ -268,7 +278,8 @@ export default function MapView({
           </Polyline>
         )}
 
-        {bypassRouteCoords.length > 0 && (
+        {/* Never paint cyan line if the highway is blocked and bypass shares the same path */}
+        {bypassRouteCoords.length > 0 && (!isBlocked || !isSamePath) && (
           <Polyline
             key={`bypass-${originName}-${destName}`}
             positions={bypassRouteCoords}
@@ -323,7 +334,7 @@ export default function MapView({
             const isHelipad = facility.type === 'helipad';
             const symbol = isHelipad ? '◈' : '✚';
             const bg = isHelipad ? '#a855f7' : '#eab308';
-            const border = isBlocked ? '#00f0ff' : '#ffffff';
+            const border = isBlocked ? (isSamePath ? '#ef4444' : '#00f0ff') : '#ffffff';
 
             return (
               <Marker
@@ -356,7 +367,7 @@ export default function MapView({
                     <strong>{facility.name}</strong>
                     <br />
                     <small style={{ color: '#94a3b8' }}>
-                      Positioned along active AI Bypass corridor ({routes?.bypass?.corridorName || 'NH Alternate'}).
+                      Positioned along transit corridor ({routes?.bypass?.corridorName || 'NH Alternate'}).
                     </small>
                     <div style={{ color: '#38bdf8', fontSize: '10px', marginTop: '4px' }}>
                       Status: Ready for convoy emergency diversion or air replenishment.
@@ -390,12 +401,23 @@ export default function MapView({
         {cargo && primaryRouteCoords.length > 0 && (
           <Marker
             key={`cargo-${cargo.id}`}
-            position={isBlocked && bypassRouteCoords.length > 0 ? bypassRouteCoords[0] : primaryRouteCoords[0]}
-            icon={createPinIcon('🚚', '#f6c453')}
+            position={
+              isBlocked
+                ? isSamePath
+                  ? primaryRouteCoords[0]
+                  : bypassRouteCoords[0] || primaryRouteCoords[0]
+                : primaryRouteCoords[0]
+            }
+            icon={createPinIcon('🚚', isBlocked && isSamePath ? '#ef4444' : '#f6c453')}
           >
             <Popup>
               <strong>{cargo.id}</strong> ({cargo.type})<br />
-              Status: {isBlocked ? 'Diverted onto AI Bypass' : 'En Route on Primary Corridor'}
+              Status:{' '}
+              {isBlocked
+                ? isSamePath
+                  ? 'Convoy Halted: All Road Access Severed'
+                  : 'Diverted onto AI Bypass'
+                : 'En Route on Primary Corridor'}
             </Popup>
           </Marker>
         )}
@@ -429,7 +451,14 @@ export default function MapView({
             <span>Cyan Fringe</span>
           </div>
           <div style={{ color: isBlocked ? '#ef4444' : isHighRisk ? '#f59e0b' : '#10b981' }}>
-            Corridor State: {isBlocked ? 'SEVERED / AI BYPASS ACTIVE' : isHighRisk ? 'HIGH SATURATION RISK' : 'NORMAL PASSABLE'}
+            Corridor State:{' '}
+            {isBlocked
+              ? isSamePath
+                ? 'SEVERED · NO ALTERNATE BYPASS'
+                : 'SEVERED · AI BYPASS ACTIVE'
+              : isHighRisk
+                ? 'HIGH SATURATION RISK'
+                : 'NORMAL PASSABLE'}
           </div>
         </div>
       )}

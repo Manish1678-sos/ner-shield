@@ -31,6 +31,18 @@ const emptyRoute = {
   bypass: { geojson: { coordinates: [] }, eta: 0, distance: 0, risk: 0, corridorName: '' }
 };
 
+// Check if primary and bypass share identical geometry
+function isSameRoute(routeA, routeB) {
+  const coordsA = routeA?.geojson?.coordinates || routeA?.coordinates || [];
+  const coordsB = routeB?.geojson?.coordinates || routeB?.coordinates || [];
+  if (!coordsA.length || !coordsB.length) return true;
+  if (coordsA.length !== coordsB.length) return false;
+  const midA = coordsA[Math.floor(coordsA.length / 2)];
+  const midB = coordsB[Math.floor(coordsB.length / 2)];
+  if (!midA || !midB) return true;
+  return Math.hypot(midA[0] - midB[0], midA[1] - midB[1]) < 0.005;
+}
+
 export default function App() {
   const [routes, setRoutes] = useState(emptyRoute);
   const [places, setPlaces] = useState([]);
@@ -59,6 +71,10 @@ export default function App() {
 
   const routesRef = useRef(routes);
   routesRef.current = routes;
+
+  const isPrimaryBlocked = metrics.risk > 0.8 || Boolean(incident);
+  const isDuplicateRoute = isSameRoute(routes?.primary, routes?.bypass);
+  const hasValidBypass = !isDuplicateRoute && (routes?.bypass?.coordinates?.length > 0 || routes?.bypass?.geojson?.coordinates?.length > 0);
 
   useEffect(() => {
     fetchOsmFacilities().then((osmPlaces) => {
@@ -111,7 +127,6 @@ export default function App() {
         setOriginCoords(start);
         setDestCoords(end);
 
-        // Fetch ML risk prediction from backend
         let computedRisk = 0.24;
         try {
           const { data: mlData } = await api.post('/risk/predict', {
@@ -133,7 +148,6 @@ export default function App() {
         }
         setMetrics((m) => ({ ...m, risk: computedRisk }));
 
-        // Real curved highway vectors
         const drivingData = await fetchRealDrivingRoute(currentOrigin, currentDest);
 
         setRoutes({
@@ -214,24 +228,40 @@ export default function App() {
     setMetrics((m) => ({ ...m, rainfall: 280, soil: 95, risk: 0.95 }));
     setIncident({ type: 'Major Rockslide & Mudflow', coordinates: slideCoords });
     setActive('bypass');
-    setCargo((c) => ({
-      ...c,
-      eta: routesRef.current?.bypass?.eta || 395,
-      location: 'AI STRATEGIC BYPASS'
-    }));
 
-    // Update risk status while preserving curved geometry
-    setRoutes((r) => ({
-      ...r,
-      primary: { ...r.primary, risk: 0.95 },
-      bypass: { ...r.bypass, risk: 0.12 }
-    }));
+    const duplicate = isSameRoute(routesRef.current?.primary, routesRef.current?.bypass);
+
+    if (duplicate) {
+      // Both routes traverse the identical severed road
+      setRoutes((r) => ({
+        ...r,
+        primary: { ...r.primary, risk: 0.95 },
+        bypass: { ...r.bypass, risk: 0.95, corridorName: 'NO ALTERNATE BYPASS AVAILABLE' }
+      }));
+      setCargo((c) => ({
+        ...c,
+        eta: '--',
+        location: 'CONVOY HALTED · ALL ARTERIAL ROADS SEVERED'
+      }));
+      setToast('CRITICAL: ROAD SEVERED & NO ALTERNATE BYPASS EXISTS');
+    } else {
+      setRoutes((r) => ({
+        ...r,
+        primary: { ...r.primary, risk: 0.95 },
+        bypass: { ...r.bypass, risk: 0.12 }
+      }));
+      setCargo((c) => ({
+        ...c,
+        eta: routesRef.current?.bypass?.eta || 395,
+        location: 'AI STRATEGIC BYPASS'
+      }));
+      setToast('LANDSLIDE PERSISTED · CONVOY REROUTED VIA AI BYPASS');
+    }
 
     try {
       await api.post('/incidents', payload);
-      setToast('LANDSLIDE PERSISTED TO DATABASE · CONVOY REROUTED VIA BYPASS');
     } catch {
-      setToast('SIMULATION ENGAGED (LOCAL FALLBACK MODE)');
+      // Local simulation continues cleanly
     }
   }
 
@@ -280,17 +310,38 @@ export default function App() {
     setActive('bypass');
     setDrawer(false);
 
-    setRoutes((r) => ({
-      ...r,
-      primary: { ...r.primary, risk: 0.96 },
-      bypass: { ...r.bypass, risk: 0.10 }
-    }));
+    const duplicate = isSameRoute(routesRef.current?.primary, routesRef.current?.bypass);
+
+    if (duplicate) {
+      setRoutes((r) => ({
+        ...r,
+        primary: { ...r.primary, risk: 0.96 },
+        bypass: { ...r.bypass, risk: 0.96, corridorName: 'NO ALTERNATE BYPASS AVAILABLE' }
+      }));
+      setCargo((c) => ({
+        ...c,
+        eta: '--',
+        location: 'CONVOY HALTED · NO BYPASS AVAILABLE'
+      }));
+      setToast('HAZARD LOGGED: CORRIDOR SEVERED · NO DETOUR AVAILABLE');
+    } else {
+      setRoutes((r) => ({
+        ...r,
+        primary: { ...r.primary, risk: 0.96 },
+        bypass: { ...r.bypass, risk: 0.10 }
+      }));
+      setCargo((c) => ({
+        ...c,
+        eta: routesRef.current?.bypass?.eta || 395,
+        location: 'AI STRATEGIC BYPASS'
+      }));
+      setToast('FIELD ALERT VERIFIED & LOGGED TO FASTAPI BACKEND');
+    }
 
     try {
       await api.post('/incidents', payload);
-      setToast('FIELD ALERT VERIFIED & LOGGED TO FASTAPI BACKEND');
     } catch {
-      setToast('ALERT LOGGED LOCALLY');
+      // Local simulation continues cleanly
     }
   }
 
@@ -465,7 +516,7 @@ export default function App() {
             title={routes?.primary?.corridorName || 'PRIMARY CORRIDOR'}
             route={routes?.primary}
             color={
-              metrics.risk > 0.8 || incident
+              isPrimaryBlocked
                 ? '#ef4444'
                 : metrics.risk > 0.45
                   ? '#f59e0b'
@@ -475,9 +526,17 @@ export default function App() {
             onClick={() => setActive('primary')}
           />
           <RouteCard
-            title={routes?.bypass?.corridorName || 'AI STRATEGIC BYPASS'}
-            route={routes?.bypass}
-            color="#00f0ff"
+            title={
+              isPrimaryBlocked && isDuplicateRoute
+                ? 'NO ALTERNATE BYPASS'
+                : routes?.bypass?.corridorName || 'AI STRATEGIC BYPASS'
+            }
+            route={
+              isPrimaryBlocked && isDuplicateRoute
+                ? { ...routes?.bypass, eta: '--', distance: '--', risk: routes?.primary?.risk || 0.95 }
+                : routes?.bypass
+            }
+            color={isPrimaryBlocked && isDuplicateRoute ? '#ef4444' : '#00f0ff'}
             selected={active === 'bypass'}
             onClick={() => setActive('bypass')}
           />
@@ -493,12 +552,17 @@ export default function App() {
               <span className="temp">{cargo.temperature}</span>
             </div>
             <div className="cargo-progress">
-              <i style={{ width: active === 'bypass' ? '50%' : '20%' }} />
+              <i style={{ width: isPrimaryBlocked && isDuplicateRoute ? '0%' : active === 'bypass' ? '50%' : '20%' }} />
             </div>
             <div className="cargo-foot">
               <span>{cargo.location}</span>
               <span>
-                ETA <b>{active === 'bypass' ? routes?.bypass?.eta : routes?.primary?.eta} min</b>
+                ETA{' '}
+                <b>
+                  {isPrimaryBlocked && isDuplicateRoute
+                    ? 'HALTED'
+                    : `${active === 'bypass' ? routes?.bypass?.eta : routes?.primary?.eta} min`}
+                </b>
               </span>
             </div>
           </div>
@@ -541,7 +605,7 @@ export default function App() {
                   className="legend-line"
                   style={{
                     background:
-                      metrics.risk > 0.8 || incident
+                      isPrimaryBlocked
                         ? '#ef4444'
                         : metrics.risk > 0.45
                           ? '#f59e0b'
@@ -553,9 +617,12 @@ export default function App() {
               <span>
                 <i
                   className="legend-line"
-                  style={{ background: '#00f0ff', borderTop: '2px dashed #00f0ff' }}
+                  style={{
+                    background: isPrimaryBlocked && isDuplicateRoute ? '#ef4444' : '#00f0ff',
+                    borderTop: `2px dashed ${isPrimaryBlocked && isDuplicateRoute ? '#ef4444' : '#00f0ff'}`
+                  }}
                 />{' '}
-                AI BYPASS
+                {isPrimaryBlocked && isDuplicateRoute ? 'BYPASS SEVERED' : 'AI BYPASS'}
               </span>
               <span><i className="legend-square blocked" /> BLOCKED</span>
               <span><i className="legend-dot hospital" /> FACILITY</span>
